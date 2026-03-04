@@ -3,7 +3,10 @@
 use num_complex::Complex32;
 
 const MEDIAN_SYMBOLS: usize = 64;
-const MAX_FREQ_OFFSET: f32 = 0.4;
+/// Maximum FM discriminator value before rejecting burst.
+/// Must accommodate BLE 2M (±0.5 normalized) plus PFB bin frequency offset
+/// (up to ±0.28 for RFNM at 122.88 Msps / 122 channels).
+const MAX_FREQ_OFFSET: f32 = 0.85;
 
 /// Result of FSK demodulation
 pub struct FskResult {
@@ -20,21 +23,38 @@ pub struct FskDemod {
     pos_points: Vec<f32>,
     neg_points: Vec<f32>,
     sps: usize,
+    /// Ratio of target sample rate to actual sample rate.
+    /// 1.0 = no resampling needed (exact rate match).
+    /// < 1.0 = actual rate is higher than target (e.g., RFNM 122.88 vs 122 MHz).
+    resample_ratio: f64,
 }
 
 impl FskDemod {
     pub fn new(sps: usize) -> Self {
+        Self::with_resample(sps, 1.0)
+    }
+
+    /// Create demodulator with resampling support.
+    /// `resample_ratio` = target_channel_rate / actual_channel_rate.
+    /// For SDRs with exact sample rates (USRP, bladeRF), ratio = 1.0.
+    /// For RFNM at 122.88 Msps / 122 ch: ratio = 2.0 / 2.0144 = 0.99283.
+    pub fn with_resample(sps: usize, resample_ratio: f64) -> Self {
         let median_size = sps * MEDIAN_SYMBOLS;
         Self {
             prev_sample: Complex32::new(0.0, 0.0),
             pos_points: Vec::with_capacity(median_size),
             neg_points: Vec::with_capacity(median_size),
             sps,
+            resample_ratio,
         }
     }
 
     fn median_size(&self) -> usize {
         self.sps * MEDIAN_SYMBOLS
+    }
+
+    fn needs_resample(&self) -> bool {
+        (self.resample_ratio - 1.0).abs() > 0.001
     }
 
     /// Reset demodulator state
@@ -118,17 +138,24 @@ impl FskDemod {
     /// Raw FM discriminator only (no CFO check, no normalization).
     /// Used by LE Coded decoder as a fallback when full demod fails,
     /// since coded preamble correlation works on unnormalized FM output.
+    /// Resamples output if channel rate doesn't match target.
     pub fn fm_discriminate_raw(&mut self, burst: &[Complex32]) -> Vec<f32> {
         self.reset();
-        self.freq_discriminate(burst)
+        let demod = self.freq_discriminate(burst);
+        if self.needs_resample() {
+            resample_linear(&demod, self.resample_ratio)
+        } else {
+            demod
+        }
     }
 
     /// Full FSK demodulation pipeline:
     /// 1. FM demodulate
     /// 2. CFO correction (median-based)
     /// 3. Normalize to roughly [-1, 1]
-    /// 4. Silence detection
-    /// 5. Bit slicing (one bit per symbol, sample at center)
+    /// 4. Resample to target rate (if channel rate != target)
+    /// 5. Silence detection
+    /// 6. Bit slicing (one bit per symbol, sample at center)
     pub fn demodulate(&mut self, burst: &[Complex32]) -> Option<FskResult> {
         self.reset();
 
@@ -150,6 +177,13 @@ impl FskDemod {
             demod[0] = 0.0;
         }
 
+        // Resample from actual channel rate to target (sps * 1 MHz).
+        // This corrects timing drift from non-integer PFB bin spacing
+        // (e.g., RFNM 122.88/61 = 2.0144 Msps → resample to 2.0 Msps).
+        if self.needs_resample() {
+            demod = resample_linear(&demod, self.resample_ratio);
+        }
+
         let silence_offset = Self::silence_skip(&demod);
 
         // Bit slicing: sample every sps samples starting at offset+1
@@ -168,6 +202,26 @@ impl FskDemod {
             deviation,
         })
     }
+}
+
+/// Resample a signal using linear interpolation.
+/// `ratio` = target_rate / source_rate (< 1.0 means output is shorter).
+/// For each output sample i, the corresponding source position is i / ratio.
+fn resample_linear(input: &[f32], ratio: f64) -> Vec<f32> {
+    let out_len = (input.len() as f64 * ratio) as usize;
+    let mut output = Vec::with_capacity(out_len);
+    let step = 1.0 / ratio; // source samples per output sample
+    for i in 0..out_len {
+        let src = i as f64 * step;
+        let idx = src as usize;
+        let frac = (src - idx as f64) as f32;
+        if idx + 1 < input.len() {
+            output.push(input[idx] * (1.0 - frac) + input[idx + 1] * frac);
+        } else if idx < input.len() {
+            output.push(input[idx]);
+        }
+    }
+    output
 }
 
 /// Re-slice an existing demod signal at a different samples-per-symbol rate.
@@ -212,5 +266,28 @@ mod tests {
         }
         let offset = FskDemod::silence_skip(&demod);
         assert!(offset > 40 && offset < 55, "silence_skip returned {}", offset);
+    }
+
+    #[test]
+    fn test_resample_identity() {
+        // Ratio 1.0 should produce identical output
+        let input: Vec<f32> = (0..100).map(|i| i as f32 * 0.1).collect();
+        let output = resample_linear(&input, 1.0);
+        assert_eq!(output.len(), input.len());
+        for (a, b) in input.iter().zip(output.iter()) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_resample_downsample() {
+        // Ratio < 1.0: output should be shorter
+        let input: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.01).sin()).collect();
+        let ratio = 2.0 / 2.0144; // RFNM case
+        let output = resample_linear(&input, ratio);
+        let expected_len = (1000.0 * ratio) as usize;
+        assert_eq!(output.len(), expected_len);
+        // First and last samples should be close to input
+        assert!((output[0] - input[0]).abs() < 0.01);
     }
 }

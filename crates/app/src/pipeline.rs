@@ -796,7 +796,12 @@ fn spawn_parallel_pipeline(
         })
         .collect();
 
-    let n_workers = active.len().min(8).max(1);
+    let hw_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    // Scale workers with channel count: allow up to hw_threads-2 (reserve for
+    // PFB and SDR recv threads), capped by the number of active channels.
+    let n_workers = active.len().min(hw_threads.saturating_sub(2).max(4)).max(1);
 
     // Burst output channel: all workers send here, decode thread receives
     let (burst_tx, burst_rx) = channel::bounded::<Burst>(512);
@@ -1029,6 +1034,8 @@ fn detect_sdr_type(iface: &str) -> &str {
         "soapysdr"
     } else if iface.starts_with("aaronia") {
         "aaronia"
+    } else if iface.starts_with("rfnm") {
+        "rfnm"
     } else {
         "usrp" // default
     }
@@ -1046,6 +1053,8 @@ enum SdrHandle {
     Soapy(bd_sdr::soapysdr::SoapyHandle),
     #[cfg(feature = "aaronia")]
     Aaronia(bd_sdr::aaronia::AaroniaHandle),
+    #[cfg(feature = "rfnm")]
+    Rfnm(bd_sdr::rfnm::RfnmHandle),
 }
 
 // Safety: SDR C library handles are thread-safe (recv from one thread is fine).
@@ -1065,6 +1074,8 @@ impl SdrHandle {
             SdrHandle::Soapy(h) => h.recv_into_i16(buf),
             #[cfg(feature = "aaronia")]
             SdrHandle::Aaronia(h) => h.recv_into_i16(buf),
+            #[cfg(feature = "rfnm")]
+            SdrHandle::Rfnm(h) => h.recv_into_i16(buf),
         }
     }
 
@@ -1080,6 +1091,8 @@ impl SdrHandle {
             SdrHandle::Soapy(h) => h.max_samps(),
             #[cfg(feature = "aaronia")]
             SdrHandle::Aaronia(h) => h.max_samps(),
+            #[cfg(feature = "rfnm")]
+            SdrHandle::Rfnm(h) => h.max_samps(),
         }
     }
 
@@ -1095,6 +1108,18 @@ impl SdrHandle {
             SdrHandle::Soapy(h) => h.overflow_count(),
             #[cfg(feature = "aaronia")]
             SdrHandle::Aaronia(h) => h.overflow_count(),
+            #[cfg(feature = "rfnm")]
+            SdrHandle::Rfnm(h) => h.overflow_count(),
+        }
+    }
+
+    /// Actual sample rate in Hz. Most SDRs match the requested rate exactly.
+    /// RFNM may differ (e.g., 122.88 Msps when 122 Msps was requested).
+    fn actual_sample_rate(&self, requested: u32) -> u64 {
+        match self {
+            #[cfg(feature = "rfnm")]
+            SdrHandle::Rfnm(h) => h.actual_sample_rate(),
+            _ => requested as u64,
         }
     }
 
@@ -1116,6 +1141,8 @@ impl SdrHandle {
             SdrHandle::Soapy(h) => h.set_gain(gain),
             #[cfg(feature = "aaronia")]
             SdrHandle::Aaronia(h) => h.set_gain(gain),
+            #[cfg(feature = "rfnm")]
+            SdrHandle::Rfnm(h) => h.set_gain(gain),
         }
     }
 }
@@ -1165,6 +1192,13 @@ fn open_sdr_handle(
                 iface, sample_rate, center_freq_hz, gain, antenna,
             )?;
             Ok(SdrHandle::Aaronia(h))
+        }
+        #[cfg(feature = "rfnm")]
+        "rfnm" => {
+            let h = bd_sdr::rfnm::RfnmHandle::open(
+                iface, sample_rate, center_freq_hz, gain, antenna,
+            )?;
+            Ok(SdrHandle::Rfnm(h))
         }
         _ => Err(format!(
             "unsupported SDR type '{}' (interface: '{}'). Compile with the appropriate feature flag.",
@@ -1244,7 +1278,25 @@ pub fn run_live(
         })
         .collect();
 
-    let fsk = FskDemod::new(sps);
+    // Open SDR early so we can query the actual sample rate for resample ratio.
+    let mut sdr = open_sdr_handle(iface, sample_rate, center_freq_hz, gain, hackrf_lna, hackrf_vga, antenna)?;
+
+    // Compute resample ratio: if actual per-channel rate differs from target
+    // (sps * 1 MHz), resample demod output to correct timing drift.
+    // RFNM: 122.88/61 = 2.0144 Msps, ratio = 2.0/2.0144 = 0.99283.
+    // Other SDRs: actual == requested, ratio = 1.0 (no resampling).
+    let actual_rate = sdr.actual_sample_rate(sample_rate);
+    let actual_channel_rate = actual_rate as f64 / (num_channels as f64 / 2.0);
+    let target_channel_rate = sps as f64 * 1_000_000.0;
+    let resample_ratio = target_channel_rate / actual_channel_rate;
+    if (resample_ratio - 1.0).abs() > 0.001 {
+        eprintln!(
+            "FSK: resampling {:.4} → {:.4} Msps/ch (ratio={:.6})",
+            actual_channel_rate / 1e6, target_channel_rate / 1e6, resample_ratio,
+        );
+    }
+
+    let fsk = FskDemod::with_resample(sps, resample_ratio);
 
     let pcap_writer: Option<PcapWriter<BufWriter<File>>> = if let Some(path) = pcap_path {
         let file = File::create(path)
@@ -1528,8 +1580,6 @@ pub fn run_live(
     // GPU path
     #[cfg(feature = "gpu")]
     if use_gpu {
-        let sdr = open_sdr_handle(iface, sample_rate, center_freq_hz, gain, hackrf_lna, hackrf_vga, antenna)?;
-
         return run_live_gpu_loop(
             sdr, &running, num_channels, semi_len, &prototype, fft_scale,
             live_ch, first_live, last_live, burst_catchers,
@@ -1553,7 +1603,6 @@ pub fn run_live(
     //   -> [broadcast] -> parallel burst workers -> decode thread
     use std::sync::atomic::AtomicU64;
 
-    let mut sdr = open_sdr_handle(iface, sample_rate, center_freq_hz, gain, hackrf_lna, hackrf_vga, antenna)?;
     let max_samps = sdr.max_samps();
 
     let overflow_count = Arc::new(AtomicU64::new(0));

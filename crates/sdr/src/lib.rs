@@ -17,6 +17,9 @@ pub mod soapysdr;
 #[cfg(feature = "aaronia")]
 pub mod aaronia;
 
+#[cfg(feature = "rfnm")]
+pub mod rfnm;
+
 use crossbeam::channel::Sender;
 
 /// Sample buffer: a block of interleaved int16 IQ samples
