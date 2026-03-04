@@ -88,6 +88,32 @@ fn main() {
         println!("cargo:rustc-link-lib=AaroniaRTSAAPI");
     }
 
+    #[cfg(feature = "rfnm")]
+    {
+        // Compile C++ shim for librfnm
+        println!("cargo:rerun-if-changed=csrc/rfnm_shim.cpp");
+        println!("cargo:rerun-if-changed=csrc/rfnm_shim.h");
+        let mut build = cc::Build::new();
+        build.cpp(true);
+        build.file("csrc/rfnm_shim.cpp");
+        build.include("/usr/local/include");
+        build.flag("-std=c++17");
+        // Match librfnm's spdlog defines so our set_level() operates on the
+        // same shared default logger instance, not a header-only copy.
+        build.define("SPDLOG_COMPILED_LIB", None);
+        build.define("SPDLOG_FMT_EXTERNAL", None);
+        build.define("SPDLOG_SHARED_LIB", None);
+        build.define("FMT_SHARED", None);
+        build.compile("rfnm_shim");
+
+        link_lib("librfnm", "rfnm");
+        println!("cargo:rustc-link-lib=usb-1.0");
+        println!("cargo:rustc-link-lib=stdc++");
+        // spdlog used by librfnm; we call set_level to suppress noisy internal logging
+        println!("cargo:rustc-link-lib=spdlog");
+        println!("cargo:rustc-link-lib=fmt");
+    }
+
     #[cfg(feature = "soapysdr")]
     {
         link_lib("SoapySDR", "SoapySDR");

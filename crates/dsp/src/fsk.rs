@@ -3,7 +3,10 @@
 use num_complex::Complex32;
 
 const MEDIAN_SYMBOLS: usize = 64;
-const MAX_FREQ_OFFSET: f32 = 0.4;
+/// Maximum FM discriminator value before rejecting burst.
+/// Must accommodate BLE 2M (±0.5 normalized) plus PFB bin frequency offset
+/// (up to ±0.28 for RFNM at 122.88 Msps / 122 channels).
+const MAX_FREQ_OFFSET: f32 = 0.85;
 
 /// Result of FSK demodulation
 pub struct FskResult {

@@ -196,6 +196,17 @@ fn print_extcap_interfaces() {
             }
         }
     }
+    #[cfg(feature = "rfnm")]
+    {
+        if let Ok(devices) = bd_sdr::rfnm::list_devices() {
+            for dev in &devices {
+                println!(
+                    "interface {{value=rfnm-{}}}{{display=Blue Dragon RFNM {}}}",
+                    dev.serial, dev.board_name
+                );
+            }
+        }
+    }
 }
 
 fn print_extcap_dlts() {
@@ -346,6 +357,18 @@ fn main() {
                     }
                 }
                 Err(e) => eprintln!("error listing Aaronia devices: {}", e),
+            }
+        }
+        #[cfg(feature = "rfnm")]
+        {
+            match bd_sdr::rfnm::list_devices() {
+                Ok(devices) => {
+                    for dev in &devices {
+                        eprintln!("  rfnm-{} ({})", dev.serial, dev.board_name);
+                        found += 1;
+                    }
+                }
+                Err(e) => eprintln!("error listing RFNM devices: {}", e),
             }
         }
         if found == 0 {
