@@ -45,8 +45,9 @@ int rfnm_shim_find(rfnm_shim_info* info, int max_devices) {
 
 rfnm_shim_dev rfnm_shim_open(const char* serial) {
     try {
-        // Suppress librfnm's spdlog chatter (cc overwritten, stale cc, etc.)
-        spdlog::set_level(spdlog::level::err);
+        // Suppress all librfnm spdlog output. At error level, USB bulk tx
+        // fail messages still flood stderr (~12/sec at 122.88 Msps).
+        spdlog::set_level(spdlog::level::off);
 
         std::string addr = serial ? serial : "";
         auto* dev = new rfnm::device(rfnm::TRANSPORT_USB, addr);

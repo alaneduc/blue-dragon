@@ -1876,7 +1876,6 @@ fn run_live_gpu_loop(
 
     let mut pos: usize = 0;
     let mut raw_buf = gpu.raw_buffer();
-    let mut gpu_batch_count = 0u64;
 
     for i16_buf in sdr_rx.iter() {
         // Copy i16 data into GPU raw buffer, handling partial fills
@@ -1890,36 +1889,6 @@ fn run_live_gpu_loop(
 
             if pos >= buffer_len {
                 if let Some(result) = gpu.submit() {
-                    gpu_batch_count += 1;
-                    // Diagnostic: check GPU output for first few batches
-                    if gpu_batch_count <= 3 || gpu_batch_count % 500 == 0 {
-                        let scale = 1.0 / num_channels as f64;
-                        // Find peak non-DC channel (skip ch0) across first 10 time steps
-                        let mut peak_amp = 0.0f64;
-                        let mut peak_ch = 0usize;
-                        for t in 0..10.min(GPU_BATCH_SIZE) {
-                            let base = t * num_channels * 2;
-                            for ch in 1..num_channels {
-                                let idx = base + ch * 2;
-                                let re = result[idx] as f64 * scale;
-                                let im = result[idx + 1] as f64 * scale;
-                                let amp = (re * re + im * im).sqrt();
-                                if amp > peak_amp {
-                                    peak_amp = amp;
-                                    peak_ch = ch;
-                                }
-                            }
-                        }
-                        let ch0_re = result[0] as f64 * scale;
-                        let ch0_im = result[1] as f64 * scale;
-                        let ch0_amp = (ch0_re * ch0_re + ch0_im * ch0_im).sqrt();
-                        let peak_db = if peak_amp > 0.0 { 20.0 * peak_amp.log10() } else { -120.0 };
-                        eprintln!(
-                            "[gpu] batch #{}: peak_ch={} amp={:.6} ({:.1} dB), dc_amp={:.6}, squelch=-45",
-                            gpu_batch_count, peak_ch, peak_amp, peak_db, ch0_amp,
-                        );
-                    }
-
                     let ts = {
                         let now = SystemTime::now()
                             .duration_since(UNIX_EPOCH)

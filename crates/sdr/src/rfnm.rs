@@ -328,7 +328,7 @@ impl RfnmHandle {
         }
 
         self.recv_count += 1;
-        if self.recv_count <= 3 || self.recv_count % 5000 == 0 {
+        if self.recv_count == 1 {
             let check = elems_read.min(1024);
             let mut sum_sq = 0u64;
             for i in 0..check {
@@ -338,8 +338,8 @@ impl RfnmHandle {
             }
             let rms = ((sum_sq as f64) / (check as f64)).sqrt();
             eprintln!(
-                "[rfnm] recv #{}: {} samps, rms={:.1}, dc=({:.0},{:.0}), overflows={}",
-                self.recv_count, elems_read, rms, self.dc_i, self.dc_q, self.overflow_count,
+                "[rfnm] first recv: {} samps, rms={:.1}, dc=({:.0},{:.0})",
+                elems_read, rms, self.dc_i, self.dc_q,
             );
         }
         elems_read
