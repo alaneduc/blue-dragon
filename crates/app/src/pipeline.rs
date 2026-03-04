@@ -1113,6 +1113,16 @@ impl SdrHandle {
         }
     }
 
+    /// Actual sample rate in Hz. Most SDRs match the requested rate exactly.
+    /// RFNM may differ (e.g., 122.88 Msps when 122 Msps was requested).
+    fn actual_sample_rate(&self, requested: u32) -> u64 {
+        match self {
+            #[cfg(feature = "rfnm")]
+            SdrHandle::Rfnm(h) => h.actual_sample_rate(),
+            _ => requested as u64,
+        }
+    }
+
     /// Set SDR gain at runtime. For HackRF, gain is split as LNA=gain, VGA from lna/vga fields.
     #[allow(unused_variables)]
     fn set_gain(&self, gain: f64, hackrf_lna: Option<u32>, hackrf_vga: Option<u32>) {
@@ -1268,7 +1278,25 @@ pub fn run_live(
         })
         .collect();
 
-    let fsk = FskDemod::new(sps);
+    // Open SDR early so we can query the actual sample rate for resample ratio.
+    let mut sdr = open_sdr_handle(iface, sample_rate, center_freq_hz, gain, hackrf_lna, hackrf_vga, antenna)?;
+
+    // Compute resample ratio: if actual per-channel rate differs from target
+    // (sps * 1 MHz), resample demod output to correct timing drift.
+    // RFNM: 122.88/61 = 2.0144 Msps, ratio = 2.0/2.0144 = 0.99283.
+    // Other SDRs: actual == requested, ratio = 1.0 (no resampling).
+    let actual_rate = sdr.actual_sample_rate(sample_rate);
+    let actual_channel_rate = actual_rate as f64 / (num_channels as f64 / 2.0);
+    let target_channel_rate = sps as f64 * 1_000_000.0;
+    let resample_ratio = target_channel_rate / actual_channel_rate;
+    if (resample_ratio - 1.0).abs() > 0.001 {
+        eprintln!(
+            "FSK: resampling {:.4} → {:.4} Msps/ch (ratio={:.6})",
+            actual_channel_rate / 1e6, target_channel_rate / 1e6, resample_ratio,
+        );
+    }
+
+    let fsk = FskDemod::with_resample(sps, resample_ratio);
 
     let pcap_writer: Option<PcapWriter<BufWriter<File>>> = if let Some(path) = pcap_path {
         let file = File::create(path)
@@ -1552,8 +1580,6 @@ pub fn run_live(
     // GPU path
     #[cfg(feature = "gpu")]
     if use_gpu {
-        let sdr = open_sdr_handle(iface, sample_rate, center_freq_hz, gain, hackrf_lna, hackrf_vga, antenna)?;
-
         return run_live_gpu_loop(
             sdr, &running, num_channels, semi_len, &prototype, fft_scale,
             live_ch, first_live, last_live, burst_catchers,
@@ -1577,7 +1603,6 @@ pub fn run_live(
     //   -> [broadcast] -> parallel burst workers -> decode thread
     use std::sync::atomic::AtomicU64;
 
-    let mut sdr = open_sdr_handle(iface, sample_rate, center_freq_hz, gain, hackrf_lna, hackrf_vga, antenna)?;
     let max_samps = sdr.max_samps();
 
     let overflow_count = Arc::new(AtomicU64::new(0));

@@ -141,6 +141,8 @@ pub struct RfnmHandle {
     /// IIR DC offset estimates for I and Q channels
     dc_i: f64,
     dc_q: f64,
+    /// Actual sample rate in Hz (may differ from requested)
+    actual_rate: u64,
 }
 
 unsafe impl Send for RfnmHandle {}
@@ -279,6 +281,7 @@ impl RfnmHandle {
                 recv_count: 0,
                 dc_i: 0.0,
                 dc_q: 0.0,
+                actual_rate: actual_rate,
             })
         }
     }
@@ -350,6 +353,10 @@ impl RfnmHandle {
 
     pub fn max_samps(&self) -> usize {
         self.max_samps
+    }
+
+    pub fn actual_sample_rate(&self) -> u64 {
+        self.actual_rate
     }
 
     pub fn overflow_count(&self) -> u64 {
