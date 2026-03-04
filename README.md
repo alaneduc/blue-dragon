@@ -33,6 +33,7 @@ dashboard for real-time monitoring.
 | bladeRF backend | Tested | 88.7% CRC OTA at -g 30 |
 | SoapySDR backend | Tested | |
 | Spectran V6 | Tested | 92 MHz BW, ~38% CRC OTA (tuning ongoing) |
+| RFNM (Lime) | Tested | Full BLE band (122.88 Msps), 71-78% CRC OTA |
 | HCI GATT probing | Untested | Compiles, needs end-to-end test with --hci |
 | HCI active scanning | Tested | --active-scan enriches device data |
 | Channel counts -C 60+ | Tested | -C 40 and -C 60 validated on USRP and bladeRF |
@@ -46,6 +47,7 @@ dashboard for real-time monitoring.
 | bladeRF 2.0 | `-i bladerf0` | 4-56 MHz (normal), up to 122 MHz (oversample) | 12-bit (normal) / 8-bit (oversample) | AD9361 (oversample overclocks beyond AD spec) |
 | SoapySDR | `-i soapy-N` | Varies | Varies | Generic SDR support |
 | Spectran V6 | `-i aaronia` | 92-245 MHz | f32 | Use `-C 92`, `-C 122`, or `-C 245` (device-dependent) |
+| RFNM (Lime) | `-i rfnm` or `-i rfnm-SERIAL` | 122 MHz | 12-bit | 122.88 Msps base clock, all 40 BLE channels |
 
 To list available SDR devices:
 
@@ -63,6 +65,7 @@ too low buries the signal in the noise floor (low CRC rate).**
 | bladeRF 2.0 | 60 | **25-35** | 50-60 | Clips at 60 OTA -- use 30 |
 | HackRF | 40 LNA / 20 VGA | TBD | TBD | Separate `--hackrf-lna` / `--hackrf-vga` |
 | Spectran V6 | 20 | 10-20 | N/A | `-g N` sets reflevel to -N dBm; auto-scaled f32→i16 |
+| RFNM (Lime) | 30 | 20-30 | 30 | Lime gain range -24 to 30 dB |
 | SoapySDR | 60 | Device-dependent | Device-dependent | Depends on underlying hardware |
 
 **Symptoms of gain too high:** BLE count = 0, all bursts fail decode (ADC saturation
@@ -195,6 +198,22 @@ sensitive, default), `-g 10` = -10 dBm, `-g 0` = 0 dBm (most headroom).
 The backend auto-scales the f32 samples to i16 using RMS measured over
 20 packets at startup (25th percentile to filter WiFi burst outliers).
 
+### RFNM
+
+Requires librfnm and spdlog installed (typically from source to
+`/usr/local`). The RFNM with Lime daughtercard runs at 122.88 Msps,
+covering the entire BLE band (all 40 channels) simultaneously. GPU
+acceleration is required at this sample rate.
+
+    cargo build --release --features "rfnm,gpu,zmq"
+
+    blue-dragon -l -i rfnm -C 122 -c 2441 -g 30 --check-crc --stats
+
+The 122.88 MHz base clock doesn't divide evenly into 1 MHz channels
+(122.88/61 = 2.0144 Msps per channel). The FSK demodulator automatically
+resamples to correct the timing drift. This is transparent and does not
+affect other SDR backends.
+
 ### Feature Flags
 
 Features are opt-in. Build only what you need:
@@ -210,6 +229,7 @@ Features are opt-in. Build only what you need:
 | `gpu` | OpenCL GPU acceleration | ocl-icd-opencl-dev |
 | `hci` | Active GATT probing + LE scanning via HCI | libdbus-1-dev (for BlueZ D-Bus) |
 | `aaronia` | Spectran V6 support | RTSA Suite Pro |
+| `rfnm` | RFNM (Lime daughtercard) support | librfnm, spdlog |
 
 ## BLE 5 PHY Support
 
@@ -340,6 +360,10 @@ Capture 92 MHz with Spectran V6:
 Capture full BLE band with bladeRF at recommended OTA gain:
 
     blue-dragon -l -i bladerf0 -a -g 30 --check-crc --stats
+
+Capture full BLE band (all 40 channels) with RFNM:
+
+    blue-dragon -l -i rfnm -C 122 -c 2441 -g 30 --check-crc --stats
 
 Capture with active BLE scanning for device enrichment:
 
@@ -592,6 +616,7 @@ currently uses int8 (i8) for OpenCL kernel compatibility.
 | HackRF | 8-bit | `<< 8` (no extra precision) | Native i8 |
 | SoapySDR (CS16) | Device-dependent | Dynamic left-shift | Right-shift to i8 |
 | Spectran V6 | 32-bit float | Scaled f32 → i16 | Scaled f32 → i8 |
+| RFNM (Lime) | 12-bit | CS16 native (12-bit left-shifted to i16) | CS16 → i16 GPU path |
 
 The i16 pipeline gives 12-bit SDRs (USRP, bladeRF) their full dynamic
 range -- about 24 dB more than the i8 path. HackRF is natively 8-bit,
